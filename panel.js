@@ -37,6 +37,14 @@
   // ---------- parsing ----------
   const ord = (n) => (n === 1 ? '1st' : n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`);
   const periodLabel = (p) => (p <= 4 ? ord(p) : p === 5 ? 'OT' : `${p - 4}OT`);
+  // "11:33" -> 693, "0:33" -> 33, "33.0" -> 33
+  const parseClockText = (s) => {
+    if (typeof s !== 'string') return null;
+    let m = s.trim().match(/^(\d{1,2}):(\d{2})(?:\.\d+)?$/);
+    if (m) return Number(m[1]) * 60 + Number(m[2]);
+    m = s.trim().match(/^(\d{1,2})(?:\.\d+)?$/);
+    return m ? Number(m[1]) : null;
+  };
   const fmtClock = (sec) => {
     const s = Math.max(0, Math.round(sec));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -77,13 +85,20 @@
     }
 
     const period = Number(st.period) || 0;
-    const clock = typeof st.clock === 'number' ? st.clock : null;
+    // Read the clock from ESPN's display text first; its numeric "clock" field has been seen
+    // dropping the minutes (e.g. 33 for "11:33").
+    const rawClock = typeof st.clock === 'number' ? st.clock : null;
+    const textClock = parseClockText(st.displayClock);
+    const clock = textClock != null ? textClock : rawClock;
     // CFB overtime has no game clock; NFL OT does (10:00 regular season).
     const hasClock = clock != null && !(league === 'CFB' && period > 4);
 
     return {
       id: `${league}-${ev.id}`,
+      eventId: String(ev.id),
+      compId: String(comp.id || ev.id),
       league,
+      rawClock,
       state: type.state || 'pre',        // pre | in | post
       statusName: type.name || '',
       shortDetail: type.shortDetail || type.detail || '',
@@ -108,15 +123,117 @@
   }
 
   // ---------- fetching ----------
-  async function fetchFeed(feed) {
+  async function getJSON(url, ms) {
     const ctrl = new AbortController();
-    const to = setTimeout(() => ctrl.abort(), 9000);
+    const to = setTimeout(() => ctrl.abort(), ms);
     try {
-      const r = await fetch(feed.url, { signal: ctrl.signal, cache: 'no-store' });
+      const r = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = await r.json();
-      return (j.events || []).map((e) => parseEvent(e, feed.league));
+      return await r.json();
     } finally { clearTimeout(to); }
+  }
+
+  async function fetchFeed(feed) {
+    const j = await getJSON(feed.url, 9000);
+    return (j.events || []).map((e) => parseEvent(e, feed.league));
+  }
+
+  // ---------- clock cross-check ----------
+  // ESPN's scoreboard occasionally sends a bad clock (or lags a few minutes). For live games we also
+  // read ESPN's small per-game status feed and only show a clock that is physically possible:
+  // a game clock can't run down faster than real time.
+  const CORE_LEAGUE = { NFL: 'nfl', CFB: 'college-football' };
+  const seen = new Map(); // gameId -> { period, clock, since, bad }
+  let pollCount = 0;
+
+  async function fetchCore(g) {
+    const url = `https://sports.core.api.espn.com/v2/sports/football/leagues/${CORE_LEAGUE[g.league]}/events/${g.eventId}/competitions/${g.compId}/status`;
+    const j = await getJSON(url, 6000);
+    const t = j.type || {};
+    const text = parseClockText(j.displayClock);
+    return {
+      src: 'game feed', period: Number(j.period) || 0,
+      clock: text != null ? text : (typeof j.clock === 'number' ? j.clock : null),
+      statusName: t.name || '', state: t.state || '', shortDetail: t.shortDetail || '',
+    };
+  }
+
+  async function mapLimit(items, n, fn) {
+    const out = new Array(items.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (next < items.length) { const k = next++; try { out[k] = await fn(items[k]); } catch { out[k] = null; } }
+    }));
+    return out;
+  }
+
+  const ahead = (a, b) => a.period > b.period || (a.period === b.period && a.clock < b.clock);
+
+  async function reconcile(list) {
+    const now = Date.now();
+    pollCount++;
+    const live = list.filter((g) => g.state === 'in' && g.hasClock);
+    const liveIds = new Set(live.map((g) => g.id));
+    for (const id of seen.keys()) if (!liveIds.has(id)) seen.delete(id);
+
+    // Games near the end of a quarter (or acting up) get checked every poll; the rest every 4th poll.
+    const due = live.filter((g) => {
+      const s = seen.get(g.id);
+      return g.clock <= 420 || (s && (s.clock <= 420 || s.bad)) || pollCount % 4 === 1;
+    }).sort((a, b) => a.clock - b.clock).slice(0, 24);
+    const cores = await mapLimit(due, 8, fetchCore);
+    const coreById = new Map();
+    due.forEach((g, i) => { const c = cores[i]; if (c && c.clock != null && c.state === 'in' && c.period) coreById.set(g.id, c); });
+
+    for (const g of live) {
+      const sb = { src: 'scoreboard', period: g.period, clock: g.clock, statusName: g.statusName, shortDetail: g.shortDetail };
+      const core = coreById.get(g.id);
+      const prev = seen.get(g.id);
+      if (g.rawClock != null && Math.abs(g.rawClock - g.clock) > 2) {
+        console.warn('[Quarter Clock] ESPN numeric clock disagrees with its display text', g.id, g.rawClock, g.displayClock);
+      }
+      // Possible = not running backwards a period, and not dropping more than the real time that has
+      // passed since the clock last changed, plus 3 min of slack for ESPN catching up after a lag.
+      const SLACK = 180;
+      const possible = (r) => !prev || r.period > prev.period ||
+        (r.period === prev.period && (r.clock >= prev.clock || prev.clock - r.clock <= (now - prev.since) / 1000 + SLACK));
+
+      let pick = sb;
+      g.glitch = '';
+      if (core && core.period === sb.period && Math.abs(core.clock - sb.clock) > SLACK) {
+        // The two feeds are minutes apart, so one is wrong: go with the one closer to what we last
+        // showed (or the later clock on first sight), and flag it if the other claimed less time left.
+        pick = prev && prev.period === sb.period
+          ? (Math.abs(core.clock - prev.clock) <= Math.abs(sb.clock - prev.clock) ? core : sb)
+          : (core.clock >= sb.clock ? core : sb);
+        const other = pick === core ? sb : core;
+        if (other.clock < pick.clock) g.glitch = `ESPN ${other.src} said ${fmtClock(other.clock)}; ${pick.src} says ${fmtClock(pick.clock)}`;
+      } else if (core) {
+        pick = ahead(sb, core) ? sb : core; // otherwise just use whichever feed is further along
+      }
+
+      if (prev && pick.period === prev.period && pick.clock > prev.clock && pick.src !== prev.src) {
+        // A staler feed showing more time left than we already know about: keep the fresher clock.
+        g.clock = prev.clock; g.period = prev.period;
+        continue;
+      }
+      if (prev && !possible(pick) && (prev.bad || 0) + 1 < 3) {
+        // Hold the last good clock; if ESPN keeps saying it for 3 polls in a row, believe it.
+        prev.bad = (prev.bad || 0) + 1;
+        g.glitch = `ESPN sent ${fmtClock(pick.clock)} (${periodLabel(pick.period)}), which isn't possible yet. Showing last good clock.`;
+        console.warn('[Quarter Clock] held implausible clock', g.id, { scoreboard: sb, core, prev });
+        g.clock = prev.clock; g.period = prev.period;
+        continue;
+      }
+
+      if (pick.src !== 'scoreboard') {
+        if (pick.statusName) g.statusName = pick.statusName;
+        if (pick.shortDetail) g.shortDetail = pick.shortDetail;
+      }
+      g.clock = pick.clock; g.period = pick.period;
+      const changed = !prev || prev.period !== pick.period || prev.clock !== pick.clock;
+      seen.set(g.id, { period: pick.period, clock: pick.clock, src: pick.src, since: changed ? now : prev.since, bad: 0 });
+    }
   }
 
   async function refresh() {
@@ -133,6 +250,7 @@
       }
     });
     if (anyOk) lastOk = Date.now();
+    try { await reconcile(next); } catch (e) { console.warn('[Quarter Clock] cross-check failed', e); }
     games = next;
     checkAlerts();
     render();
@@ -218,13 +336,14 @@
     const badge = g.period === 2 ? '<span class="badge" title="Clock runs to halftime">HALF</span>'
       : g.period === 4 ? '<span class="badge" title="Clock runs to end of regulation">END</span>' : '';
     const t = g.hasClock ? fmtClock(g.clock) : periodLabel(g.period);
-    const p = g.hasClock ? `${periodLabel(g.period)}${badge}` : 'overtime';
+    const gl = g.glitch ? `<span class="gl" title="${esc(g.glitch)}">⚠</span>` : '';
+    const p = g.hasClock ? `${periodLabel(g.period)}${badge}${gl}` : 'overtime';
     return `<a class="game ${heat}${flashing.has(g.id) ? ' flash' : ''}" href="${esc(g.href)}" target="_blank" rel="noopener" data-id="${esc(g.id)}">
       <div class="clk"><span class="t">${t}</span><span class="p">${p}</span></div>
       <div class="teams">${teamRow(g.away, g.home, true)}${teamRow(g.home, g.away, true)}</div>
       <div class="meta"><span class="lg">${g.league}</span>
         ${g.redZone ? '<span class="rz">RZ</span>' : ''}
-        ${g.sit ? `<span class="sit">${esc(g.sit)}</span>` : ''}
+        ${g.glitch ? `<span class="glt">${esc(g.glitch)}</span>` : g.sit ? `<span class="sit">${esc(g.sit)}</span>` : ''}
         ${g.net ? `<span class="net">${esc(g.net)}</span>` : ''}</div>
       <div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>
     </a>`;
