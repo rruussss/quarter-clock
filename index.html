@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quarter Clock</title>
+<link rel="icon" href="icon-32.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="app.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Quarter Clock">
+<meta name="theme-color" content="#0d1117">
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --card2: #1c2129; --line: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --faint: #6e7681;
+    --hot: #f85149; --hot-bg: rgba(248,81,73,.10);
+    --warm: #d29922; --warm-bg: rgba(210,153,34,.08);
+    --accent: #58a6ff; --ok: #3fb950;
+    --bar: #30363d;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fa; --card: #ffffff; --card2: #f6f8fa; --line: #d0d7de;
+      --text: #1f2328; --muted: #57606a; --faint: #8c959f;
+      --hot: #cf222e; --hot-bg: rgba(207,34,46,.07);
+      --warm: #9a6700; --warm-bg: rgba(154,103,0,.07);
+      --accent: #0969da; --ok: #1a7f37; --bar: #d0d7de;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { min-width: 260px; }
+  button, select { font: inherit; color: inherit; }
+
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg);
+    border-bottom: 1px solid var(--line); padding: 8px 10px 8px; }
+  .top { display: flex; align-items: center; gap: 8px; }
+  .top h1 { font-size: 14px; margin: 0; white-space: nowrap; font-weight: 650; letter-spacing: .2px; }
+  .status { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; margin-left: auto; white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--hot); }
+  .iconbtn { background: none; border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px;
+    cursor: pointer; color: var(--muted); line-height: 1; display: inline-flex; align-items: center; }
+  .iconbtn:hover { color: var(--text); border-color: var(--muted); }
+  .iconbtn svg { width: 14px; height: 14px; }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+  .chip { border: 1px solid var(--line); background: var(--card); border-radius: 999px;
+    padding: 2px 9px; cursor: pointer; font-size: 12px; color: var(--muted); user-select: none; }
+  .chip[aria-pressed="true"] { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--card)); }
+  .ctl { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+  .ctl select { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; }
+
+  main { padding: 6px 8px 24px; }
+  .sec { display: flex; align-items: baseline; gap: 6px; margin: 12px 2px 6px;
+    font-size: 11px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); font-weight: 600; }
+  .sec .n { color: var(--faint); font-weight: 500; }
+
+  .game { display: grid; grid-template-columns: 66px 1fr; gap: 0 10px; text-decoration: none; color: inherit;
+    background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--line);
+    border-radius: 8px; padding: 7px 9px 8px 8px; margin-bottom: 6px; position: relative; }
+  .game:hover { border-color: var(--muted); }
+  .game.warm { border-left-color: var(--warm); background: linear-gradient(90deg, var(--warm-bg), transparent 70%), var(--card); }
+  .game.hot  { border-left-color: var(--hot);  background: linear-gradient(90deg, var(--hot-bg), transparent 70%), var(--card); }
+  .game.flash { animation: flash 1s ease-in-out 6; }
+  @keyframes flash { 50% { box-shadow: 0 0 0 2px var(--hot); } }
+
+  .clk { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; }
+  .clk .t { font: 700 22px/1 ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+  .game.warm .clk .t { color: var(--warm); }
+  .game.hot  .clk .t { color: var(--hot); }
+  .clk .p { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap; }
+  .badge { display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .5px; padding: 0 4px;
+    border-radius: 3px; border: 1px solid currentColor; margin-left: 3px; vertical-align: 1px; }
+
+  .teams { min-width: 0; }
+  .tm { display: flex; align-items: center; gap: 6px; height: 19px; }
+  .tm img { width: 16px; height: 16px; object-fit: contain; flex: none; }
+  .tm .nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tm .rk { color: var(--faint); font-size: 11px; margin-right: 2px; }
+  .tm .sc { font-weight: 650; font-variant-numeric: tabular-nums; min-width: 22px; text-align: right; }
+  .tm.lead .nm, .tm.lead .sc { font-weight: 700; }
+  .tm .poss { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; visibility: hidden; }
+  .tm.hasball .poss { visibility: visible; }
+  .meta { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; margin-top: 5px;
+    font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; }
+  .meta .lg { font-weight: 700; font-size: 9.5px; letter-spacing: .5px; padding: 0 4px; border-radius: 3px; background: var(--card2); border: 1px solid var(--line); color: var(--muted); }
+  .meta .sit { overflow: hidden; text-overflow: ellipsis; color: var(--text); opacity: .85; }
+  .meta .rz { color: var(--hot); font-weight: 700; }
+  .meta .net { margin-left: auto; color: var(--faint); }
+  .bar { grid-column: 1 / -1; height: 3px; background: var(--bar); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--muted); }
+  .game.warm .bar i { background: var(--warm); }
+  .game.hot .bar i { background: var(--hot); }
+
+  .game.brk .clk .t { font-size: 15px; letter-spacing: 0; }
+  .game.pre { grid-template-columns: 66px 1fr; padding-top: 6px; padding-bottom: 6px; }
+  .game.pre .clk .t { font-size: 13px; font-weight: 650; }
+
+  details.up > summary { list-style: none; cursor: pointer; }
+  details.up > summary::-webkit-details-marker { display: none; }
+  details.up > summary .sec::before { content: "▸"; margin-right: 2px; }
+  details.up[open] > summary .sec::before { content: "▾"; }
+
+  body.compact .game { padding-top: 5px; padding-bottom: 5px; margin-bottom: 4px; }
+  body.compact .game .meta { display: none; }
+  body.compact .game .bar { margin-top: 4px; }
+  body.compact .clk .t { font-size: 19px; }
+  img.gone { visibility: hidden; }
+  [hidden] { display: none !important; }
+  @media (pointer: coarse) {
+    .chip { padding: 5px 12px; font-size: 13px; }
+    .ctl select { padding: 4px 6px; font-size: 13px; }
+    .iconbtn { padding: 6px 9px; }
+    .iconbtn svg { width: 16px; height: 16px; }
+    body { -webkit-tap-highlight-color: transparent; }
+  }
+  body { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+  .empty { color: var(--muted); text-align: center; padding: 22px 8px; border: 1px dashed var(--line); border-radius: 8px; }
+  .err { color: var(--hot); font-size: 11px; margin: 6px 2px; }
+  footer { color: var(--faint); font-size: 10.5px; padding: 4px 10px 14px; }
+  footer button { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 10.5px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <h1>Quarter Clock</h1>
+    <span class="status"><span class="dot" id="dot"></span><span id="updated">Loading…</span></span>
+    <button class="iconbtn" id="refresh" title="Refresh now" aria-label="Refresh now">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M12.5 1.8v2.6H9.9"/></svg>
+    </button>
+    <button class="iconbtn" id="popout" title="Pop out into its own small window" aria-label="Pop out">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 2.5h4.5V7"/><path d="M13.5 2.5 7.5 8.5"/><path d="M11.5 9.5v3.5a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5V5a.5.5 0 0 1 .5-.5h3.5"/></svg>
+    </button>
+  </div>
+  <div class="controls">
+    <span class="chip" id="f-nfl" role="button" aria-pressed="true">NFL</span>
+    <span class="chip" id="f-cfb" role="button" aria-pressed="true">CFB</span>
+    <span class="chip" id="f-half" role="button" aria-pressed="false" title="Only show games in the 2nd or 4th quarter">Q2 + Q4 only</span>
+    <label class="ctl" title="Beep + notification when a game's quarter clock drops under this">Alert
+      <select id="alertAt">
+        <option value="0">off</option>
+        <option value="60">1:00</option>
+        <option value="120">2:00</option>
+        <option value="180">3:00</option>
+        <option value="300">5:00</option>
+      </select>
+    </label>
+    <span class="chip" id="f-sound" role="button" aria-pressed="true" title="Play a beep with alerts">Sound</span>
+    <span class="chip" id="f-compact" role="button" aria-pressed="false" title="Hide down/distance and network to fit more games">Compact</span>
+    <span class="chip" id="f-awake" role="button" aria-pressed="true" title="Keep the screen from sleeping while this page is open" hidden>Stay awake</span>
+  </div>
+</header>
+<main id="main"></main>
+<footer>
+  Clock = ESPN's game clock as of the last play (refreshes every 8s while games are live). Tap a game to open ESPN Gamecast.
+  <button id="testAlert">Test alert</button>
+</footer>
+<script src="panel.js"></script>
+</body>
+</html>
